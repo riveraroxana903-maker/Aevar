@@ -1,0 +1,98 @@
+name: Crear APK de Aevar
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Preparar la web del juego
+        run: |
+          test -f index.html || { echo "Falta index.html en la raiz del repositorio"; exit 1; }
+          mkdir -p www
+          cp index.html www/index.html
+
+      - name: Crear el proyecto Android
+        run: |
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          npx cap init Aevar com.aevar.ecos --web-dir www
+          npx cap add android
+          npx cap sync android
+
+      - name: Icono y pantalla completa
+        continue-on-error: true
+        run: |
+          pip install pillow
+          cat > icon.py <<'PYEOF'
+          from PIL import Image, ImageDraw, ImageFilter
+          import os, sys
+          res = sys.argv[1] if len(sys.argv) > 1 else 'res'
+          def emblem(S, pad):
+              im = Image.new('RGBA', (S, S), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+              c = S / 2; r = S * (0.5 - pad)
+              glow = Image.new('RGBA', (S, S), (0, 0, 0, 0)); gd = ImageDraw.Draw(glow)
+              gd.ellipse([c - r * 0.95, c - r * 1.05, c + r * 0.95, c + r * 0.85], fill=(190, 170, 255, 120))
+              im.alpha_composite(glow.filter(ImageFilter.GaussianBlur(S * 0.05)))
+              d.ellipse([c - r * 0.62, c - r * 0.95, c + r * 0.62, c + r * 0.29], fill=(236, 232, 248, 255))
+              d.polygon([(c - r, c + r * 0.9), (c - r * 0.45, c + r * 0.05), (c - r * 0.1, c + r * 0.5), (c + r * 0.3, c - r * 0.1), (c + r, c + r * 0.9)], fill=(14, 10, 24, 255))
+              w = r * 0.13; top = (c, c - r * 0.2); l = (c - r * 0.42, c + r * 0.75); rt = (c + r * 0.42, c + r * 0.75)
+              d.line([l, top, rt], fill=(168, 140, 255, 255), width=int(w), joint='curve')
+              d.line([(c - r * 0.2, c + r * 0.42), (c + r * 0.2, c + r * 0.42)], fill=(168, 140, 255, 255), width=int(w * 0.8))
+              return im
+          def bg(S):
+              im = Image.new('RGBA', (S, S)); px = im.load()
+              for y in range(S):
+                  t = y / S
+                  for x in range(S):
+                      px[x, y] = (int(22 + 30 * t), int(12 + 8 * t), int(44 + 40 * (1 - t)), 255)
+              return im
+          dens = {'mdpi': (48, 108), 'hdpi': (72, 162), 'xhdpi': (96, 216), 'xxhdpi': (144, 324), 'xxxhdpi': (192, 432)}
+          for k, (L, F) in dens.items():
+              d = os.path.join(res, 'mipmap-' + k); os.makedirs(d, exist_ok=True)
+              full = bg(L); full.alpha_composite(emblem(L, 0.06)); full.convert('RGBA').save(os.path.join(d, 'ic_launcher.png'))
+              rnd = full.copy(); m = Image.new('L', (L, L), 0); ImageDraw.Draw(m).ellipse([0, 0, L - 1, L - 1], fill=255); rnd.putalpha(m); rnd.save(os.path.join(d, 'ic_launcher_round.png'))
+              emblem(F, 0.2).save(os.path.join(d, 'ic_launcher_foreground.png'))
+          v = os.path.join(res, 'values'); os.makedirs(v, exist_ok=True)
+          open(os.path.join(v, 'ic_launcher_background.xml'), 'w').write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#160c2c</color>\n</resources>\n')
+          PYEOF
+          python3 icon.py android/app/src/main/res
+          sed -i '/name="AppTheme.NoActionBar"/a\        <item name="android:windowFullscreen">true</item>' android/app/src/main/res/values/styles.xml
+
+      - name: Compilar el APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Guardar el APK
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk Aevar.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aevar-apk
+          path: Aevar.apk
+
+      - name: Publicar descarga directa
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "apk-${{ github.run_number }}" Aevar.apk --title "Aevar APK ${{ github.run_number }}" --notes "APK listo para instalar en Android." --latest
